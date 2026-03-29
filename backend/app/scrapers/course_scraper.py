@@ -1,0 +1,103 @@
+"""
+Scraper for the UChicago course catalog.
+Target: catalog.uchicago.edu
+"""
+
+import requests
+from bs4 import BeautifulSoup
+from sqlalchemy.orm import Session
+
+from app.models.database import Course, Major, MajorRequirement
+
+BASE_URL = "http://collegecatalog.uchicago.edu"
+
+
+def get_departments() -> list[dict]:
+    """Fetch list of departments from the catalog."""
+    resp = requests.get(f"{BASE_URL}/thecollege/programsofstudy/")
+    soup = BeautifulSoup(resp.text, "lxml")
+
+    departments = []
+    # Parse department links from the programs of study page
+    for link in soup.select("a[href*='/thecollege/']"):
+        href = link.get("href", "")
+        name = link.get_text(strip=True)
+        if name and "/programsofstudy/" in href:
+            departments.append({"name": name, "url": BASE_URL + href})
+
+    return departments
+
+
+def scrape_courses_for_dept(dept_url: str, dept_name: str) -> list[dict]:
+    """Scrape all courses for a given department page."""
+    resp = requests.get(dept_url)
+    soup = BeautifulSoup(resp.text, "lxml")
+
+    courses = []
+    for block in soup.select(".courseblock"):
+        title_el = block.select_one(".courseblocktitle")
+        desc_el = block.select_one(".courseblockdesc")
+
+        if not title_el:
+            continue
+
+        title_text = title_el.get_text(strip=True)
+        # Parse "DEPT 12345. Course Title. 100 Units." pattern
+        parts = title_text.split(".")
+        if len(parts) >= 2:
+            course_id = parts[0].strip()
+            course_title = parts[1].strip()
+            units = parts[2].strip() if len(parts) > 2 else ""
+        else:
+            course_id = title_text
+            course_title = title_text
+            units = ""
+
+        # Split course_id into dept and number
+        id_parts = course_id.split(maxsplit=1)
+        dept_code = id_parts[0] if id_parts else dept_name
+        number = id_parts[1] if len(id_parts) > 1 else ""
+
+        description = desc_el.get_text(strip=True) if desc_el else ""
+
+        courses.append({
+            "dept": dept_code,
+            "number": number,
+            "title": course_title,
+            "description": description,
+            "units": units,
+        })
+
+    return courses
+
+
+def save_courses(db: Session, courses: list[dict]):
+    """Save scraped courses to the database."""
+    for c in courses:
+        existing = (
+            db.query(Course)
+            .filter_by(dept=c["dept"], number=c["number"])
+            .first()
+        )
+        if existing:
+            existing.title = c["title"]
+            existing.description = c["description"]
+            existing.units = c.get("units", "")
+        else:
+            db.add(Course(**c))
+    db.commit()
+
+
+def scrape_all(db: Session):
+    """Run the full course catalog scrape."""
+    print("Fetching departments...")
+    departments = get_departments()
+    print(f"Found {len(departments)} departments")
+
+    for dept in departments:
+        print(f"Scraping: {dept['name']}...")
+        courses = scrape_courses_for_dept(dept["url"], dept["name"])
+        print(f"  Found {len(courses)} courses")
+        save_courses(db, courses)
+
+    print("Course scraping complete!")
