@@ -18,11 +18,12 @@ def get_departments() -> list[dict]:
     soup = BeautifulSoup(resp.text, "lxml")
 
     departments = []
-    # Parse department links from the programs of study page
-    for link in soup.select("a[href*='/thecollege/']"):
+    # Department links live in the left nav menu
+    nav = soup.select("ul.nav.leveltwo li a")
+    for link in nav:
         href = link.get("href", "")
         name = link.get_text(strip=True)
-        if name and "/programsofstudy/" in href:
+        if name and href and href.startswith("/thecollege/") and href != "/thecollege/programsofstudy/":
             departments.append({"name": name, "url": BASE_URL + href})
 
     return departments
@@ -34,16 +35,21 @@ def scrape_courses_for_dept(dept_url: str, dept_name: str) -> list[dict]:
     soup = BeautifulSoup(resp.text, "lxml")
 
     courses = []
-    for block in soup.select(".courseblock"):
-        title_el = block.select_one(".courseblocktitle")
+    for block in soup.select("div.courseblock.main"):
+        title_el = block.select_one(".courseblocktitle strong")
         desc_el = block.select_one(".courseblockdesc")
+        detail_el = block.select_one(".courseblockdetail")
 
         if not title_el:
             continue
 
+        # Title format: "DEPT\xa012345.  Course Title.  100 Units."
         title_text = title_el.get_text(strip=True)
-        # Parse "DEPT 12345. Course Title. 100 Units." pattern
-        parts = title_text.split(".")
+        # Replace non-breaking spaces with regular spaces
+        title_text = title_text.replace("\xa0", " ")
+
+        # Split on ". " to separate code, title, and units
+        parts = [p.strip() for p in title_text.split(".") if p.strip()]
         if len(parts) >= 2:
             course_id = parts[0].strip()
             course_title = parts[1].strip()
@@ -60,12 +66,30 @@ def scrape_courses_for_dept(dept_url: str, dept_name: str) -> list[dict]:
 
         description = desc_el.get_text(strip=True) if desc_el else ""
 
+        # Parse prerequisites and terms from detail block
+        prerequisites = ""
+        quarters = ""
+        instructors = ""
+        if detail_el:
+            detail_text = detail_el.get_text(separator="\n")
+            for line in detail_text.split("\n"):
+                line = line.strip()
+                if line.startswith("Prerequisite(s):"):
+                    prerequisites = line.replace("Prerequisite(s):", "").strip()
+                elif line.startswith("Terms Offered:"):
+                    quarters = line.replace("Terms Offered:", "").strip()
+                elif line.startswith("Instructor(s):"):
+                    instructors = line.replace("Instructor(s):", "").strip()
+
         courses.append({
             "dept": dept_code,
             "number": number,
             "title": course_title,
             "description": description,
             "units": units,
+            "prerequisites": prerequisites or None,
+            "quarters": quarters or None,
+            "instructors": instructors or None,
         })
 
     return courses

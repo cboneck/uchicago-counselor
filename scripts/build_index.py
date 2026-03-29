@@ -7,16 +7,20 @@ from app.models.database import SessionLocal, init_db, Course, RedditPost, Reddi
 from app.rag.embeddings import get_chroma_client, init_collections
 from app.rag.chunker import chunk_course, chunk_reddit_post, chunk_text
 
+BATCH_SIZE = 20
+
 if __name__ == "__main__":
     init_db()
     db = SessionLocal()
     client = get_chroma_client()
     collections = init_collections(client)
 
-    # Index courses
+    # Index courses in batches
     print("Indexing courses...")
     courses = db.query(Course).all()
-    for course in courses:
+    docs, metas, ids = [], [], []
+
+    for i, course in enumerate(courses):
         text = chunk_course({
             "dept": course.dept,
             "number": course.number,
@@ -26,42 +30,61 @@ if __name__ == "__main__":
             "instructors": course.instructors or "",
             "quarters": course.quarters or "",
         })
-        collections["course_descriptions"].add(
-            documents=[text],
-            metadatas=[{"dept": course.dept, "number": course.number, "course_id": course.id}],
-            ids=[f"course_{course.id}"],
-        )
-    print(f"  Indexed {len(courses)} courses")
+        docs.append(text)
+        metas.append({"dept": course.dept, "number": course.number, "course_id": course.id})
+        ids.append(f"course_{course.id}")
 
-    # Index Reddit posts
+        if len(docs) >= BATCH_SIZE:
+            collections["course_descriptions"].add(documents=docs, metadatas=metas, ids=ids)
+            print(f"  Indexed {i + 1}/{len(courses)} courses...")
+            docs, metas, ids = [], [], []
+
+    # Flush remaining
+    if docs:
+        collections["course_descriptions"].add(documents=docs, metadatas=metas, ids=ids)
+    print(f"  Indexed {len(courses)} courses total")
+
+    # Index Reddit posts (if any)
     print("Indexing Reddit feedback...")
     posts = db.query(RedditPost).all()
     count = 0
+    docs, metas, ids = [], [], []
     for post in posts:
         comments = db.query(RedditComment).filter_by(post_id=post.id).all()
         chunks = chunk_reddit_post(
             {"subreddit": post.subreddit, "title": post.title, "body": post.body or ""},
             [{"body": c.body, "score": c.score} for c in comments],
         )
-        for i, chunk in enumerate(chunks):
-            collections["reddit_feedback"].add(
-                documents=[chunk],
-                metadatas=[{"post_id": post.id, "subreddit": post.subreddit}],
-                ids=[f"reddit_{post.id}_{i}"],
-            )
+        for j, chunk in enumerate(chunks):
+            docs.append(chunk)
+            metas.append({"post_id": post.id, "subreddit": post.subreddit})
+            ids.append(f"reddit_{post.id}_{j}")
             count += 1
+
+            if len(docs) >= BATCH_SIZE:
+                collections["reddit_feedback"].add(documents=docs, metadatas=metas, ids=ids)
+                docs, metas, ids = [], [], []
+
+    if docs:
+        collections["reddit_feedback"].add(documents=docs, metadatas=metas, ids=ids)
     print(f"  Indexed {count} Reddit chunks")
 
-    # Index career listings
+    # Index career listings (if any)
     print("Indexing career info...")
     listings = db.query(CareerListing).all()
+    docs, metas, ids = [], [], []
     for listing in listings:
         text = f"{listing.title}\n{listing.description or ''}\nEmployer: {listing.employer or 'N/A'}"
-        collections["career_info"].add(
-            documents=[text],
-            metadatas=[{"type": listing.type or "", "listing_id": listing.id}],
-            ids=[f"career_{listing.id}"],
-        )
+        docs.append(text)
+        metas.append({"type": listing.type or "", "listing_id": listing.id})
+        ids.append(f"career_{listing.id}")
+
+        if len(docs) >= BATCH_SIZE:
+            collections["career_info"].add(documents=docs, metadatas=metas, ids=ids)
+            docs, metas, ids = [], [], []
+
+    if docs:
+        collections["career_info"].add(documents=docs, metadatas=metas, ids=ids)
     print(f"  Indexed {len(listings)} career listings")
 
     db.close()
